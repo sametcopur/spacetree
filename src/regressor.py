@@ -1,6 +1,7 @@
 import numpy as np
 from sklearn.linear_model import Ridge
 
+
 class SpaceTreeRegressor:
     def __init__(
         self,
@@ -209,7 +210,9 @@ class SpaceBoostingRegressor:
                 min_samples_leaf=self.min_samples_leaf,
                 n_splits=self.n_splits,
                 alpha=self.alpha,
-                random_state=(self.random_state + i if self.random_state is not None else None),
+                random_state=(
+                    self.random_state + i if self.random_state is not None else None
+                ),
             )
             tree.fit(X, residuals)
             self.trees.append(tree)
