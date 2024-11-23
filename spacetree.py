@@ -1,180 +1,225 @@
 import numpy as np
+from sklearn.linear_model import Ridge
 
-class QuantileNormDecisionTree:
-    def __init__(self, max_depth=3, n_quantiles=4, min_samples_split=10, n_ref_points=5, 
-                 impurity_method: str = 'mse'):
+class DirectionalDecisionTree:
+    def __init__(
+        self,
+        max_depth=10,
+        min_samples_split=2,
+        min_samples_leaf=1,
+        n_splits=255,
+        alpha=0.0,
+        random_state=None,
+    ):
         self.max_depth = max_depth
-        self.n_quantiles = n_quantiles
         self.min_samples_split = min_samples_split
-        self.n_ref_points = n_ref_points
-        self.impurity_method = impurity_method
+        self.min_samples_leaf = min_samples_leaf
+        self.n_splits = n_splits
         self.tree = None
-        self.norm_matrix = None
-        self.ref_points = None
+        self.direction = None
+        self.alpha = alpha
+        self.random_state = random_state
 
-    def _generate_reference_points(self, X):
-        n_features = X.shape[1]
-        ref_points = []
+    def _find_direction(self, X, y):
+        lr = Ridge(alpha=self.alpha, random_state=self.random_state)
+        lr.fit(X, y)
+        direction = lr.coef_
+        return direction / np.sqrt(np.sum(direction**2))
 
-        origin = np.zeros(n_features)
-        ref_points.append(origin)
+    def _project_data(self, X):
+        return X @ self.direction
 
-        median_point = np.median(X, axis=0)
-        ref_points.append(median_point)
-
-        n_corners = min(n_features, 3)
-        corners = np.array(list(np.ndindex((2,) * n_corners)))
-        corners = corners * 2 - 1
-
-        if n_features > n_corners:
-            padding = np.zeros((len(corners), n_features - n_corners))
-            corners = np.hstack([corners, padding])
-
-        X_std = np.std(X, axis=0)
-        X_mean = np.mean(X, axis=0)
-        corners = corners * X_std + X_mean
-        ref_points.extend(corners)
-
-        X_min = np.min(X, axis=0)
-        X_max = np.max(X, axis=0)
-        n_random = max(0, self.n_ref_points - len(ref_points))
-        if n_random > 0:
-            random_points = np.random.uniform(
-                X_min, X_max, 
-                size=(n_random, n_features)
-            )
-            ref_points.extend(random_points)
-        
-        return np.array(ref_points)
-
-    def _compute_norm_matrix(self, X):
-        """Precompute norms for all points to all reference points."""
-        n_samples = X.shape[0]
-        n_ref_points = self.ref_points.shape[0]
-        norm_matrix = np.zeros((n_samples, n_ref_points))
-        
-        for i in range(n_ref_points):
-            norm_matrix[:, i] = np.linalg.norm(X - self.ref_points[i], axis=1)
-        
-        return norm_matrix
-
-    def _find_best_split(self, indices, y, depth):
-        if len(indices) < self.min_samples_split:
-            return None, None, None, float('inf')
-            
-        best_impurity = float('inf')
-        best_threshold = None
-        best_ref_idx = None
-        best_split_indices = None
-        
-        for ref_idx in range(self.ref_points.shape[0]):
-            norms = self.norm_matrix[indices, ref_idx]
-            
-            quantiles = np.percentile(
-                norms,
-                np.linspace(0, 100, self.n_quantiles + 1)[1:-1]
-            )
-            
-            for threshold in quantiles:
-                left_mask = norms <= threshold
-                right_mask = ~left_mask
-                
-                if (np.sum(left_mask) < self.min_samples_split or 
-                    np.sum(right_mask) < self.min_samples_split):
-                    continue
-                
-                left_indices = indices[left_mask]
-                right_indices = indices[right_mask]
-                
-                left_impurity = self._calculate_impurity(y[left_indices])
-                right_impurity = self._calculate_impurity(y[right_indices])
-                
-                n_left = len(left_indices)
-                n_right = len(right_indices)
-                n_total = n_left + n_right
-                
-                total_impurity = (n_left / n_total) * left_impurity + \
-                                (n_right / n_total) * right_impurity
-                
-                if total_impurity < best_impurity:
-                    best_impurity = total_impurity
-                    best_threshold = threshold
-                    best_ref_idx = ref_idx
-                    best_split_indices = (left_indices, right_indices)
-        
-        return best_threshold, best_split_indices, best_ref_idx, best_impurity
-
-    def _calculate_impurity(self, y):
-        if len(y) == 0:
-            return 0
-            
-        y_mean = np.mean(y)
+    def _find_best_split(self, X, y):
         n_samples = len(y)
-        
-        if self.impurity_method == 'mse':
-            return np.mean((y - y_mean) ** 2)
-        elif self.impurity_method == 'se':
-            return np.sum((y - y_mean) ** 2)
-        elif self.impurity_method == 'rmse':
-            return np.sqrt(np.mean((y - y_mean) ** 2))
-        else:
-            raise ValueError(f"Unknown impurity method: {self.impurity_method}")
 
-    def _build_tree(self, indices, y, depth=0):
-        if (depth == self.max_depth or 
-            len(indices) <= self.min_samples_split or 
-            len(np.unique(y[indices])) == 1):
-            return {
-                'value': np.mean(y[indices]),
-                'is_leaf': True,
-                'n_samples': len(indices),
-                'impurity': self._calculate_impurity(y[indices])
+        if n_samples < 2 * self.min_samples_split:
+            return None, None, None
+
+        projections = self._project_data(X)
+        sort_idx = np.argsort(projections)
+        sorted_projections = projections[sort_idx]
+        sorted_y = y[sort_idx]
+
+        max_splits = n_samples - 2 * self.min_samples_split
+        if max_splits <= 0:
+            return None, None, None
+
+        n_splits = min(self.n_splits, max_splits)
+        split_indices = np.linspace(
+            self.min_samples_split,
+            n_samples - self.min_samples_split,
+            num=n_splits,
+            dtype=int,
+        )
+
+        if len(split_indices) == 0:
+            return None, None, None
+
+        cumsum_y = np.cumsum(sorted_y)
+        sq_cumsum_y = np.cumsum(sorted_y**2)
+        total_sum = cumsum_y[-1]
+        total_sq_sum = sq_cumsum_y[-1]
+
+        left_sums = cumsum_y[split_indices - 1]
+        left_counts = split_indices
+        right_counts = n_samples - split_indices
+        right_sums = total_sum - left_sums
+
+        left_sq_sums = sq_cumsum_y[split_indices - 1]
+        right_sq_sums = total_sq_sum - left_sq_sums
+
+        valid_splits = (left_counts >= self.min_samples_leaf) & (
+            right_counts >= self.min_samples_leaf
+        )
+        if not np.any(valid_splits):
+            return None, None, None
+
+        left_mse = np.where(
+            left_counts > 0,
+            (left_sq_sums - (left_sums**2 / left_counts)) / left_counts,
+            np.inf,
+        )
+        right_mse = np.where(
+            right_counts > 0,
+            (right_sq_sums - (right_sums**2 / right_counts)) / right_counts,
+            np.inf,
+        )
+        total_mse = (left_counts * left_mse + right_counts * right_mse) / n_samples
+
+        best_idx = np.argmin(total_mse[valid_splits])
+        best_threshold = sorted_projections[split_indices[valid_splits][best_idx]]
+        best_split_mask = projections <= best_threshold
+
+        return best_threshold, best_split_mask, total_mse[valid_splits][best_idx]
+
+    def _build_tree(self, X, y, depth=0):
+        n_samples = len(y)
+        node = {"n_samples": n_samples, "value": np.mean(y)}
+
+        if depth == self.max_depth or n_samples < 2 * self.min_samples_split:
+            node["is_leaf"] = True
+            return node
+
+        threshold, split_mask, score = self._find_best_split(X, y)
+
+        if threshold is None:
+            node["is_leaf"] = True
+            return node
+
+        X_left, y_left = X[split_mask], y[split_mask]
+        X_right, y_right = X[~split_mask], y[~split_mask]
+
+        if len(y_left) == 0 or len(y_right) == 0:
+            node["is_leaf"] = True
+            return node
+
+        node.update(
+            {
+                "is_leaf": False,
+                "threshold": threshold,
+                "left": self._build_tree(X_left, y_left, depth + 1),
+                "right": self._build_tree(X_right, y_right, depth + 1),
             }
+        )
 
-        best_threshold, best_split_indices, best_ref_idx, best_impurity = \
-            self._find_best_split(indices, y, depth)
-        
-        if best_threshold is None:
-            return {
-                'value': np.mean(y[indices]),
-                'is_leaf': True,
-                'n_samples': len(indices),
-                'impurity': self._calculate_impurity(y[indices])
-            }
-
-        left_indices, right_indices = best_split_indices
-
-        return {
-            'threshold': best_threshold,
-            'ref_idx': best_ref_idx,
-            'left': self._build_tree(left_indices, y, depth + 1),
-            'right': self._build_tree(right_indices, y, depth + 1),
-            'is_leaf': False,
-            'n_samples': len(indices),
-            'impurity': best_impurity
-        }
+        return node
 
     def fit(self, X, y):
-        X = np.array(X)
-        y = np.array(y)
-        self.ref_points = self._generate_reference_points(X)
-        self.norm_matrix = self._compute_norm_matrix(X)
-        indices = np.arange(len(X))
-        self.tree = self._build_tree(indices, y)
+        if len(y) < 2 * self.min_samples_split:
+            raise ValueError(
+                f"Not enough samples for min_samples_split={self.min_samples_split}"
+            )
+
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.float32)
+
+        self.direction = self._find_direction(X, y)
+        self.tree = self._build_tree(X, y)
         return self
 
     def predict(self, X):
-        X = np.array(X)
-        
-        def _predict_single(tree, x):
-            if tree['is_leaf']:
-                return tree['value']
-            
-            x_norm = np.linalg.norm(x - self.ref_points[tree['ref_idx']])
-            
-            if x_norm <= tree['threshold']:
-                return _predict_single(tree['left'], x)
-            else:
-                return _predict_single(tree['right'], x)
+        X = np.asarray(X, dtype=np.float32)
+        predictions = np.zeros(len(X), dtype=np.float32)
+        nodes = [self.tree] * len(X)
+        mask = np.ones(len(X), dtype=bool)
 
-        return np.array([_predict_single(self.tree, x) for x in X])
+        while np.any(mask):
+            leaf_mask = mask & np.array([node["is_leaf"] for node in nodes])
+            if np.any(leaf_mask):
+                predictions[leaf_mask] = np.array(
+                    [node["value"] for node in np.array(nodes)[leaf_mask]]
+                )
+                mask &= ~leaf_mask
+
+            if not np.any(mask):
+                break
+
+            projections = self._project_data(X[mask])
+            current_nodes = np.array(nodes)[mask]
+            thresholds = np.array([node["threshold"] for node in current_nodes])
+
+            go_left = projections <= thresholds
+
+            new_nodes = np.array(nodes)
+            new_nodes[mask] = np.where(
+                go_left,
+                [node["left"] for node in current_nodes],
+                [node["right"] for node in current_nodes],
+            )
+            nodes = new_nodes.tolist()
+
+        return predictions
+
+
+class GradientBoostingDirectionalTree:
+    def __init__(
+        self,
+        n_estimators=100,
+        learning_rate=0.1,
+        max_depth=10,
+        alpha=0.0,
+        min_samples_split=2,
+        min_samples_leaf=5,
+        n_splits=5,
+        random_state=None,
+    ):
+        self.n_estimators = n_estimators
+        self.learning_rate = learning_rate
+        self.max_depth = max_depth
+        self.min_samples_split = min_samples_split
+        self.min_samples_leaf = min_samples_leaf
+        self.n_splits = n_splits
+        self.trees = []
+        self.alpha = alpha
+        self.init_prediction = None
+        self.random_state = random_state
+
+    def fit(self, X, y):
+        X = np.asarray(X, dtype=np.float32)
+        y = np.asarray(y, dtype=np.float32)
+
+        self.init_prediction = np.mean(y)
+        current_predictions = np.full(len(y), self.init_prediction, dtype=np.float32)
+
+        for i in range(self.n_estimators):
+            residuals = y - current_predictions
+            tree = DirectionalDecisionTree(
+                max_depth=self.max_depth,
+                min_samples_split=self.min_samples_split,
+                min_samples_leaf=self.min_samples_leaf,
+                n_splits=self.n_splits,
+                alpha=self.alpha,
+                random_state=(self.random_state + i if self.random_state is not None else None),
+            )
+            tree.fit(X, residuals)
+            self.trees.append(tree)
+            current_predictions += self.learning_rate * tree.predict(X)
+
+    def predict(self, X):
+        X = np.asarray(X, dtype=np.float32)
+        predictions = np.full(len(X), self.init_prediction, dtype=np.float32)
+
+        for tree in self.trees:
+            predictions += self.learning_rate * tree.predict(X)
+
+        return predictions
