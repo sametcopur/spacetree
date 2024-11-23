@@ -1,113 +1,104 @@
-### Amaç
+# SpaceTreeRegressor ve SpaceBoostingRegressor: Matematiksel ve Algoritmik Yapı
 
-Bu yöntemin amacı, geleneksel **decision tree** modellerinden farklı olarak, bölünme kararını doğrudan özelliklere (feature) dayalı yapmak yerine, **verinin hedef değişkenle doğrusal ilişkisini kullanarak** daha etkili bir bölme yönü belirlemek ve bu yönde bölme yapmaktır. Bu yaklaşım özellikle **hedef değişkenin özelliklerle doğrusal ilişkilerinin güçlü olduğu durumlarda** performansı artırmayı hedefler.
-
-Doğrusal ilişkiyi belirlemek için **Linear Regression** kullanılır. Bu model, hedef değişkenin özelliklerle olan ilişkisini matematiksel olarak ifade eder ve bu ilişkiyi en iyi özetleyen bir **doğrusal hedef ekseni** hesaplar.
+Bu modeller, özellikle **SpaceTreeRegressor**'un projeksiyon temelli bölme mantığı ve **SpaceBoostingRegressor**'un ensemble öğrenme yaklaşımı ile regresyon problemlerine yenilikçi çözümler sunar. Matematiksel detaylar, verilerin nasıl işlendiği ve bölme kararlarının nasıl verildiği konusunda açıklayıcıdır.
 
 ---
 
-### 1. **Doğrusal Modelle Yön Belirleme (Linear Regression ile)**
+## **1. SpaceTreeRegressor**
 
-#### Matematiksel Açıklama:
-Verilen veri matrisi \( X \in \mathbb{R}^{n \times d} \) ve hedef değişken \( y \in \mathbb{R}^n \), doğrusal regresyon aşağıdaki problemle çözülür:
+### **Projeksiyon Yönü Nasıl Belirlenir?**
+`SpaceTreeRegressor`, klasik ağaçlardan farklı olarak her bölme için verilerin belirli bir doğrultu (yön) boyunca projekte edilmesini sağlar. Bu yön aşağıdaki gibi hesaplanır:
 
-\[
-\min_{\beta} \| X \beta - y \|^2
-\]
+1. **Doğrusal Regresyon (Linear Regression)**:
+   - Veriler \( X \) (özellik matrisi) ve \( y \) (hedef değerler) olarak düşünülür.
+   - Verilere en iyi uyum sağlayan bir doğrusal model bulunur:  
+     \[
+     \hat{y} = X \cdot w
+     \]
+     Burada \( w \), doğrusal regresyon katsayılarını temsil eder.
 
-Burada:
-- \( \beta \in \mathbb{R}^d \), doğrusal regresyon katsayılarıdır.
-- \( \| X \beta - y \|^2 \), hedef \( y \) ile tahmin arasındaki kare hata fonksiyonudur.
+2. **Normalizasyon**:
+   - \( w \), verilerin projeksiyonu için bir eksen oluşturur. Ancak birim uzunlukta olması için normalize edilir:
+     \[
+     w_{\text{norm}} = \frac{w}{\|w\|}
+     \]
+   - Bu, eksenin yalnızca yönüyle ilgilenilmesini sağlar.
 
-Bu problem çözülerek \( \beta \) katsayıları elde edilir:
-\[
-\beta = (X^\top X)^{-1} X^\top y
-\]
-
-#### Doğrusal Hedef Ekseni Hesaplama:
-Elde edilen \( \beta \) katsayıları, hedef \( y \)'yi \( X \)'teki özellikler üzerinden en iyi açıklayan doğrusal ilişkiyi temsil eder. Bu ilişki doğrultusunda bir **doğrusal hedef ekseni** oluşturulur. Katsayılar normalize edilerek bir yön vektörü elde edilir:
-
-\[
-\hat{\beta} = \frac{\beta}{\| \beta \|}
-\]
-
-Bu normalize edilmiş yön, veri matrisini (\( X \)) projekte etmek için kullanılır:
-\[
-z = X \hat{\beta}, \quad z \in \mathbb{R}^n
-\]
-
-Burada \( z \), \( X \)'in hedef değişkenle olan doğrusal ilişkisine en uygun eksene indirgenmiş halidir.
+3. **Verilerin Projeksiyonu**:
+   - Her bir veri noktası \( x_i \), belirlenen yön boyunca projekte edilir:
+     \[
+     p_i = x_i \cdot w_{\text{norm}}
+     \]
+   - Bu, verileri çok boyutlu uzaydan tek boyutlu bir projeksiyon eksenine indirger.
 
 ---
 
-### 2. **Bölme (Splitting)**
+### **Bölme Noktasını Nasıl Belirleriz?**
+Projeksiyon yapıldıktan sonra, bölme noktaları aşağıdaki şekilde optimize edilir:
 
-#### Bölme Mantığı:
-Projeksiyon değerleri (\( z \)), geleneksel bir decision tree gibi bir eşik (\( s \)) kullanılarak bölünür. Ancak burada bölme, özelliklere dayalı değil, hedef değişkenle doğrusal ilişki ekseni (\( \hat{\beta} \)) üzerindeki projeksiyon değerlerine dayalıdır.
+1. **Projeksiyonların Sıralanması**:
+   - Tüm projeksiyon değerleri \( \{p_1, p_2, \dots, p_n\} \) sıralanır.
 
-#### Matematiksel Açıklama:
-Veriler \( z \) eksenine projekte edildikten sonra, potansiyel eşik değerleri \( s \) üzerinden bölme maliyeti hesaplanır. Bu maliyet, her bir bölmenin hedef değişken \( y \) üzerindeki varyansı minimize etmesine dayanır.
+2. **Binlere Bölme**:
+   - Veri, belirli aralıklarla \( n_{\text{split}} \) bölme adayına ayrılır. Örneğin, \( n_{\text{split}} \) = 255 ise 255 eşit aralıkla aday bölme noktaları belirlenir.
 
-\[
-\text{MSE}_{\text{split}}(s) = \frac{|L|}{n} \text{Var}(y_L) + \frac{|R|}{n} \text{Var}(y_R)
-\]
+3. **Hata Hesabı (MSE)**:
+   - Her bir bölme noktası için:
+     - Veriler iki gruba ayrılır: sol (\( L \)) ve sağ (\( R \)).
+     - Her bir grup için ortalama kare hata (Mean Squared Error - MSE) hesaplanır:
+       \[
+       \text{MSE}_L = \frac{1}{|L|} \sum_{i \in L} (y_i - \bar{y}_L)^2
+       \]
+       \[
+       \text{MSE}_R = \frac{1}{|R|} \sum_{i \in R} (y_i - \bar{y}_R)^2
+       \]
+     - Toplam hata, sol ve sağ grupların ağırlıklı ortalaması ile bulunur:
+       \[
+       \text{Total MSE} = \frac{|L|}{n} \text{MSE}_L + \frac{|R|}{n} \text{MSE}_R
+       \]
 
-- \( L \) ve \( R \): \( z \)'nin eşik değerine göre ayrılan sol ve sağ gruplardır.
-- \( \text{Var}(y_L) \) ve \( \text{Var}(y_R) \): sırasıyla sol ve sağ gruplardaki hedef değişkenin varyansıdır.
-- Amaç: \( s \) eşiğini seçerek MSE'yi minimize etmektir.
-
-Projeksiyon \( z \) üzerinde:
-- \( z_L = \{ z_i \leq s \} \), \( z_R = \{ z_i > s \} \).
-
-En iyi eşik \( s^* \), aşağıdaki gibi belirlenir:
-\[
-s^* = \arg \min_s \text{MSE}_{\text{split}}(s)
-\]
-
-Bu bölme işlemi, veriyi iki alt küme \( L \) ve \( R \) olarak ayırır. Aynı işlem, rekurziv olarak her bir dalda tekrarlanır (maksimum derinlik veya minimum örnek sayısı şartlarına kadar).
-
----
-
-### 3. **Boosting ile Öğrenme**
-
-#### Amaç:
-Her bir ağaç, önceki modellerin hatalarını öğrenmeye odaklanır. Böylece modeller, kümülatif olarak hatayı azaltır ve genel performansı artırır.
-
-#### Matematiksel Açıklama:
-Boosting aşamaları şu şekilde işler:
-
-1. Başlangıç tahmini:
-\[
-F_0(x) = \bar{y}, \quad \bar{y} = \frac{1}{n} \sum_{i=1}^n y_i
-\]
-Başlangıç modeli, hedef değişkenin basit ortalamasıdır.
-
-2. Her iterasyonda:
-   - Kalan hatalar (rezidüeller) hesaplanır:
-   \[
-   r_m = y - F_{m-1}(x)
-   \]
-   - \( r_m \) üzerine yeni bir **Directional Decision Tree** (\( h_m(x) \)) fit edilir:
-   \[
-   h_m(x) = \text{DirectionalDecisionTree}(X, r_m)
-   \]
-   - Model güncellenir:
-   \[
-   F_m(x) = F_{m-1}(x) + \eta h_m(x)
-   \]
-   Burada \( \eta \) öğrenme oranıdır ve aşırı uyumu önlemek için kullanılır.
-
-Son model:
-\[
-F(x) = F_0(x) + \sum_{m=1}^M \eta h_m(x)
-\]
+4. **En İyi Bölmenin Seçilmesi**:
+   - Bölme adayları arasından toplam hatayı minimize eden \( t^* \) eşik değeri seçilir.
 
 ---
 
-### Özet:
+### **Bölme Ağacı Nasıl Oluşturulur?**
+1. **Veriler Bölünür**:
+   - Belirlenen \( t^* \) eşik değerine göre, veriler iki alt gruba ayrılır:  
+     \( L = \{i \,|\, p_i \leq t^*\} \) ve \( R = \{i \,|\, p_i > t^*\} \).
 
-- **Doğrusal ilişki ekseni:** Linear Regression, özelliklerin hedef değişkenle olan ilişkisini öğrenir ve bu doğrultuda en iyi ekseni (\( \hat{\beta} \)) belirler.
-- **Projeksiyon ve bölme:** Veriler bu eksene projekte edilerek, bölme işlemi düşük boyutta yapılır.
-- **Boosting ile hata düzeltme:** Her bir ağaç, önceki modellerin hatalarını düzeltmeye odaklanır.
+2. **Tekrarlama**:
+   - Her bir alt grup için aynı işlem tekrar edilir.
+   - Maksimum derinliğe ulaşıldığında veya yaprak düğümler yeterince küçük olduğunda işlem durur.
 
-Bu yöntem, **hedef değişkenle doğrusal ilişkilerin güçlü olduğu durumlarda**, geleneksel decision tree yaklaşımlarına kıyasla daha etkili ve anlamlı bir bölme yapmayı mümkün kılar.
+---
+
+## **2. SpaceBoostingRegressor**
+
+### **Boosting Mantığı**
+`SpaceBoostingRegressor`, bir ensemble modeli olarak, birden fazla `SpaceTreeRegressor`'u ardışık olarak kullanır. Her adımda modelin hatasını azaltmayı hedefler.
+
+1. **Başlangıç**:
+   - İlk tahmin, hedef değerlerin ortalaması \( \bar{y} \) olarak alınır:
+     \[
+     f_0(x) = \bar{y}
+     \]
+
+2. **Hata Öğrenimi (Artıklar)**:
+   - Her iterasyonda, mevcut modelin hatası (artıklar) hesaplanır:
+     \[
+     r_i = y_i - f_t(x_i)
+     \]
+   - Bu artıklar yeni bir `SpaceTreeRegressor` kullanılarak tahmin edilir.
+
+3. **Model Güncellemesi**:
+   - Yeni model, mevcut modele eklenir. Bir öğrenme oranı \( \eta \) ile ağırlıklandırılır:
+     \[
+     f_{t+1}(x) = f_t(x) + \eta h_t(x)
+     \]
+     Burada \( h_t(x) \), `SpaceTreeRegressor` tahminleridir.
+
+4. **İterasyon**:
+   - Belirli bir sayıda iterasyon yapılır veya hatanın belirli bir eşik altına düşmesi beklenir.
+
+---

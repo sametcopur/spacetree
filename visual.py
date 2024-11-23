@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import numpy as np
-from spacetree import GradientBoostingDirectionalTree
+from src.regressor import SpaceBoostingRegressor
 
 # Örnek iki boyutlu veri oluştur
 np.random.seed(42)
@@ -15,7 +15,7 @@ y = (
     + np.random.choice([0, 1], size=200, p=[0.8, 0.2])  # Random noise (discrete)
 )
 # DirectionalDecisionTree sınıfını alıyoru
-def plot_trees_colormap_with_comparison(X, y, model, interval=0.5, resolution=100):
+def plot_trees_colormap_with_comparison(X, y, model, interval=0.1, resolution=100):
     """
     Visualize predictions after each tree is added in the gradient boosting model
     using side-by-side comparison of true values and tree predictions.
@@ -74,9 +74,9 @@ def plot_trees_colormap_with_comparison(X, y, model, interval=0.5, resolution=10
     plt.show()
 
 # Example usage after training the model
-gb_model = GradientBoostingDirectionalTree(
+gb_model = SpaceBoostingRegressor(
     n_estimators=100, learning_rate=0.1, max_depth=6, n_splits=255,
     min_samples_split=2, min_samples_leaf=1, alpha=3, random_state=32
 )
 gb_model.fit(X, y)
-plot_trees_colormap_with_comparison(X, y, gb_model, interval=0.5, resolution=200)
+plot_trees_colormap_with_comparison(X, y, gb_model, interval=0.025, resolution=200)
