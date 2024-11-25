@@ -55,6 +55,7 @@ class SpaceTreeClassifier:
         min_samples_split=2,
         min_samples_leaf=1,
         alpha=0.0,
+        min_gain_split=0.0,
         random_state=None,
     ):
         self.max_depth = max_depth
@@ -63,6 +64,7 @@ class SpaceTreeClassifier:
         self.tree = None
         self.direction = None
         self.alpha = alpha
+        self.min_gain_split = min_gain_split
         self.random_state = random_state
 
     def _find_direction(self, X, y, prev_scores):
@@ -97,6 +99,9 @@ class SpaceTreeClassifier:
         total_gradients = cumsum_gradients[-1]
         total_hessians = cumsum_hessians[-1]
 
+        # Compute parent loss
+        parent_loss = -(total_gradients**2) / (total_hessians + 1e-10)
+
         # Possible split positions
         possible_split_positions = np.arange(
             self.min_samples_leaf, n_samples - self.min_samples_leaf
@@ -119,12 +124,19 @@ class SpaceTreeClassifier:
         left_loss = -(left_gradients**2) / (left_hessians + 1e-10)
         right_loss = -(right_gradients**2) / (right_hessians + 1e-10)
 
-        # Total loss
+        # Total loss after split
         total_loss = left_loss + right_loss
 
+        # Compute gain
+        gains = parent_loss - total_loss
+
         # Find the best split
-        best_idx = np.argmin(total_loss)
-        best_loss = total_loss[best_idx]
+        best_idx = np.argmax(gains)
+        best_gain = gains[best_idx]
+
+        # Check if best_gain is greater than min_gain_split
+        if best_gain < self.min_gain_split:
+            return None, None, None
 
         split_idx = possible_split_positions[best_idx]
         threshold = (
@@ -132,7 +144,7 @@ class SpaceTreeClassifier:
         ) / 2.0
 
         # Return the absolute position of the split index
-        return threshold, start + split_idx, best_loss
+        return threshold, start + split_idx, best_gain
 
     def _build_tree(self, depth=0, start=0, end=None):
         if end is None:
@@ -153,7 +165,7 @@ class SpaceTreeClassifier:
             node["value"] = total_gradients / (total_hessians + 1e-10)
             return node
 
-        threshold, split_idx, score = self._find_best_split(start, end)
+        threshold, split_idx, gain = self._find_best_split(start, end)
 
         if threshold is None:
             node["is_leaf"] = True
@@ -256,6 +268,8 @@ class SpaceBoostingClassifier:
         alpha=0.0,
         min_samples_split=2,
         min_samples_leaf=1,
+        min_gain_split=0.0,
+        bagging_fraction=1.0,
         random_state=None,
     ):
         self.n_estimators = n_estimators
@@ -263,6 +277,8 @@ class SpaceBoostingClassifier:
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
+        self.min_gain_split = min_gain_split
+        self.bagging_fraction = bagging_fraction
         self.trees = []
         self.alpha = alpha
         self.init_prediction = None
@@ -280,21 +296,36 @@ class SpaceBoostingClassifier:
             len(y), self.init_prediction, dtype=np.float32
         )  # Raw scores
 
+        rng = np.random.default_rng(self.random_state)  # Use numpy's random generator
+
         for i in range(self.n_estimators):
+            # Generate bootstrap sample indices
+            if self.bagging_fraction < 1.0:
+                sample_size = int(len(y) * self.bagging_fraction)
+                bootstrap_indices = rng.choice(len(y), size=sample_size, replace=True)
+            else:
+                bootstrap_indices = np.arange(len(y))
+
+            # Create bootstrap samples
+            X_bootstrap = X[bootstrap_indices]
+            y_bootstrap = y[bootstrap_indices]
+            current_predictions_bootstrap = current_predictions[bootstrap_indices]
+
             # Train a tree on gradients
             tree = SpaceTreeClassifier(
                 max_depth=self.max_depth,
                 min_samples_split=self.min_samples_split,
                 min_samples_leaf=self.min_samples_leaf,
                 alpha=self.alpha,
+                min_gain_split=self.min_gain_split,
                 random_state=(
                     self.random_state + i if self.random_state is not None else None
                 ),
             )
-            tree.fit(X, y, current_predictions)  # Pass raw scores
+            tree.fit(X_bootstrap, y_bootstrap, current_predictions_bootstrap)  # Pass raw scores
             self.trees.append(tree)
 
-            # Update raw scores with tree predictions
+            # Update raw scores with tree predictions on all data
             current_predictions += self.learning_rate * tree.predict_proba(X, raw=True)
 
     def predict_proba(self, X, raw=False):
