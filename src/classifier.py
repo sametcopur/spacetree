@@ -11,6 +11,10 @@ class SpaceLogisticRegressor:
     def fit(self, X, y, prev_scores):
         _, n_features = X.shape
         self.coef_ = np.zeros(n_features, dtype=np.float32)
+        epsilon = 1e-6
+        eye = np.eye(n_features)
+        hessian_stability = epsilon * eye
+        reg = self.alpha * eye
 
         for _ in range(self.max_iter):
             # Calculate current logits (raw scores)
@@ -18,18 +22,17 @@ class SpaceLogisticRegressor:
             logits = np.clip(logits, -20, 20)  # Adjusted clipping range
 
             # Convert logits to probabilities
-            probabilities = np.exp(-np.logaddexp(0, -logits))
+            probabilities = 1 / (1 + np.exp(-logits))
 
             # Compute gradients (modified logistic gradient)
             gradients = X.T @ (y - probabilities) - self.alpha * self.coef_
 
             # Compute Hessian approximation
             diag = probabilities * (1 - probabilities)
-            hessian = X.T @ (diag[:, np.newaxis] * X) + self.alpha * np.eye(n_features)
+            hessian = X.T @ (diag[:, np.newaxis] * X) + reg
 
             # Add regularization to Hessian for stability
-            epsilon = 1e-6
-            hessian += epsilon * np.eye(n_features)
+            hessian += hessian_stability
 
             # Update coefficients
             update = np.linalg.solve(hessian, gradients)
@@ -51,14 +54,12 @@ class SpaceTreeClassifier:
         max_depth=10,
         min_samples_split=2,
         min_samples_leaf=1,
-        n_splits=255,
         alpha=0.0,
         random_state=None,
     ):
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
-        self.n_splits = n_splits
         self.tree = None
         self.direction = None
         self.alpha = alpha
@@ -67,8 +68,6 @@ class SpaceTreeClassifier:
     def _find_direction(self, X, y, prev_scores):
         # Use logistic regression to find the optimal direction
         lr = SpaceLogisticRegressor(alpha=self.alpha)
-
-        # Fit logistic regression on the original target `y` and previous logit scores
         lr.fit(X, y, prev_scores)
 
         # Normalize the resulting coefficient vector to get the direction
@@ -78,105 +77,102 @@ class SpaceTreeClassifier:
     def _project_data(self, X):
         return X @ self.direction
 
-    def _find_best_split(self, X, gradients, hessians):
-        n_samples = len(gradients)
-        if n_samples < 2 * self.min_samples_split:
+    def _find_best_split(self, start, end):
+        n_samples = end - start
+
+        if n_samples < 2 * self.min_samples_leaf:
             return None, None, None
 
-        projections = self._project_data(X)
-        sort_idx = np.argsort(projections)
-        sorted_projections = projections[sort_idx]
-        sorted_gradients = gradients[sort_idx]
-        sorted_hessians = hessians[sort_idx]
+        # Sliced arrays for the current node
+        sorted_projections = self.sorted_projections[start:end]
 
-        max_splits = n_samples - 2 * self.min_samples_split
-        if max_splits <= 0:
-            return None, None, None
-
-        n_splits = min(self.n_splits, max_splits)
-        split_indices = np.linspace(
-            self.min_samples_split,
-            n_samples - self.min_samples_split,
-            num=n_splits,
-            dtype=int,
+        # Compute cumulative sums for the current node
+        cumsum_gradients = self.cumsum_gradients[start:end] - (
+            self.cumsum_gradients[start - 1] if start > 0 else 0
+        )
+        cumsum_hessians = self.cumsum_hessians[start:end] - (
+            self.cumsum_hessians[start - 1] if start > 0 else 0
         )
 
-        if len(split_indices) == 0:
-            return None, None, None
+        total_gradients = cumsum_gradients[-1]
+        total_hessians = cumsum_hessians[-1]
 
-        cumsum_gradients = np.cumsum(sorted_gradients)
-        cumsum_hessians = np.cumsum(sorted_hessians)
-
-        left_gradients = cumsum_gradients[split_indices - 1]
-        left_hessians = cumsum_hessians[split_indices - 1]
-
-        right_gradients = cumsum_gradients[-1] - left_gradients
-        right_hessians = cumsum_hessians[-1] - left_hessians
-
-        left_n = split_indices
-        right_n = n_samples - split_indices
-
-        valid_splits = (left_n >= self.min_samples_leaf) & (
-            right_n >= self.min_samples_leaf
+        # Possible split positions
+        possible_split_positions = np.arange(
+            self.min_samples_leaf, n_samples - self.min_samples_leaf
         )
-        if not np.any(valid_splits):
+
+        if len(possible_split_positions) == 0:
             return None, None, None
 
+        # Left node statistics
+        left_counts = possible_split_positions
+        left_gradients = cumsum_gradients[possible_split_positions - 1]
+        left_hessians = cumsum_hessians[possible_split_positions - 1]
+
+        # Right node statistics
+        right_counts = n_samples - left_counts
+        right_gradients = total_gradients - left_gradients
+        right_hessians = total_hessians - left_hessians
+
+        # Compute losses
         left_loss = -(left_gradients**2) / (left_hessians + 1e-10)
         right_loss = -(right_gradients**2) / (right_hessians + 1e-10)
 
+        # Total loss
         total_loss = left_loss + right_loss
-        best_idx = np.argmin(total_loss[valid_splits])
-        best_threshold = sorted_projections[split_indices[valid_splits][best_idx]]
-        best_split_mask = projections <= best_threshold
 
-        return best_threshold, best_split_mask, total_loss[valid_splits][best_idx]
+        # Find the best split
+        best_idx = np.argmin(total_loss)
+        best_loss = total_loss[best_idx]
 
-    def _build_tree(self, X, gradients, hessians, depth=0):
-        n_samples = len(gradients)
+        split_idx = possible_split_positions[best_idx]
+        threshold = (
+            sorted_projections[split_idx - 1] + sorted_projections[split_idx]
+        ) / 2.0
+
+        # Return the absolute position of the split index
+        return threshold, start + split_idx, best_loss
+
+    def _build_tree(self, depth=0, start=0, end=None):
+        if end is None:
+            end = len(self.sorted_gradients)
+
+        n_samples = end - start
         node = {"n_samples": n_samples}
 
-        # Yaprak düğüm kontrolü
-        if depth == self.max_depth or n_samples < 2 * self.min_samples_split:
+        if depth == self.max_depth or n_samples < 2 * self.min_samples_leaf:
             node["is_leaf"] = True
-            node["value"] = np.sum(gradients) / (
-                np.sum(hessians) + 1e-10
-            )  # Raw logit value
+            # Compute leaf value
+            total_gradients = self.cumsum_gradients[end - 1] - (
+                self.cumsum_gradients[start - 1] if start > 0 else 0
+            )
+            total_hessians = self.cumsum_hessians[end - 1] - (
+                self.cumsum_hessians[start - 1] if start > 0 else 0
+            )
+            node["value"] = total_gradients / (total_hessians + 1e-10)
             return node
 
-        threshold, split_mask, score = self._find_best_split(X, gradients, hessians)
+        threshold, split_idx, score = self._find_best_split(start, end)
 
         if threshold is None:
             node["is_leaf"] = True
-            node["value"] = np.sum(gradients) / (np.sum(hessians) + 1e-10)
-            return node
-
-        X_left, gradients_left, hessians_left = (
-            X[split_mask],
-            gradients[split_mask],
-            hessians[split_mask],
-        )
-        X_right, gradients_right, hessians_right = (
-            X[~split_mask],
-            gradients[~split_mask],
-            hessians[~split_mask],
-        )
-
-        if len(gradients_left) == 0 or len(gradients_right) == 0:
-            node["is_leaf"] = True
-            node["value"] = np.sum(gradients) / (np.sum(hessians) + 1e-10)
+            # Compute leaf value
+            total_gradients = self.cumsum_gradients[end - 1] - (
+                self.cumsum_gradients[start - 1] if start > 0 else 0
+            )
+            total_hessians = self.cumsum_hessians[end - 1] - (
+                self.cumsum_hessians[start - 1] if start > 0 else 0
+            )
+            node["value"] = total_gradients / (total_hessians + 1e-10)
             return node
 
         node.update(
             {
                 "is_leaf": False,
                 "threshold": threshold,
-                "left": self._build_tree(
-                    X_left, gradients_left, hessians_left, depth + 1
-                ),
-                "right": self._build_tree(
-                    X_right, gradients_right, hessians_right, depth + 1
-                ),
+                "left": self._build_tree(depth + 1, start, split_idx),
+                "right": self._build_tree(depth + 1, split_idx, end),
             }
         )
 
@@ -189,59 +185,66 @@ class SpaceTreeClassifier:
         y: Original target (0 or 1)
         prev_scores: Logit scores from previous ensemble predictions
         """
+        if len(y) < 2 * self.min_samples_leaf:
+            raise ValueError(
+                f"Not enough samples for min_samples_leaf={self.min_samples_leaf}"
+            )
+
         X = np.asarray(X, dtype=np.float32)
         y = np.asarray(y, dtype=np.float32)
 
         # Compute probabilities and gradients
         logits = prev_scores
-        probabilities = np.exp(-np.logaddexp(0, -logits))
+        probabilities = 1 / (1 + np.exp(-logits))
 
         gradients = y - probabilities
         hessians = probabilities * (1 - probabilities)
 
-        # Find projection direction
         self.direction = self._find_direction(X, y, prev_scores)
+        projections = self._project_data(X)
+        sort_idx = np.argsort(projections)
 
-        # Build the tree
-        self.tree = self._build_tree(X, gradients, hessians)
+        # Cache sorted projections, gradients, and hessians
+        self.sorted_projections = projections[sort_idx]
+        self.sorted_gradients = gradients[sort_idx]
+        self.sorted_hessians = hessians[sort_idx]
+
+        # Precompute cumulative sums
+        self.cumsum_gradients = np.cumsum(self.sorted_gradients)
+        self.cumsum_hessians = np.cumsum(self.sorted_hessians)
+
+        self.tree = self._build_tree(depth=0, start=0, end=len(y))
         return self
 
     def predict_proba(self, X, raw=False):
         X = np.asarray(X, dtype=np.float32)
-        logits = np.zeros(len(X), dtype=np.float32)
-        nodes = [self.tree] * len(X)
-        mask = np.ones(len(X), dtype=bool)
+        projections = self._project_data(X)
+        predictions = np.zeros(len(X), dtype=np.float32)
+        indices = np.arange(len(X))
+        stack = [(self.tree, indices)]
 
-        while np.any(mask):
-            leaf_mask = mask & np.array([node["is_leaf"] for node in nodes])
-            if np.any(leaf_mask):
-                logits[leaf_mask] = np.array(
-                    [node["value"] for node in np.array(nodes)[leaf_mask]]
-                )
-                mask &= ~leaf_mask
+        while stack:
+            node, idx = stack.pop()
+            if node["is_leaf"]:
+                predictions[idx] = node["value"]
+            else:
+                threshold = node["threshold"]
+                left_idx = idx[projections[idx] <= threshold]
+                right_idx = idx[projections[idx] > threshold]
 
-            if not np.any(mask):
-                break
+                if len(left_idx) > 0:
+                    stack.append((node["left"], left_idx))
+                if len(right_idx) > 0:
+                    stack.append((node["right"], right_idx))
 
-            projections = self._project_data(X[mask])
-            current_nodes = np.array(nodes)[mask]
-            thresholds = np.array([node["threshold"] for node in current_nodes])
-
-            go_left = projections <= thresholds
-
-            new_nodes = np.array(nodes)
-            new_nodes[mask] = np.where(
-                go_left,
-                [node["left"] for node in current_nodes],
-                [node["right"] for node in current_nodes],
-            )
-            nodes = new_nodes.tolist()
-
-        return logits if raw else np.exp(-np.logaddexp(0, -logits))
+        if raw:
+            return predictions
+        else:
+            return 1 / (1 + np.exp(-predictions))
 
     def predict(self, X):
         probabilities = self.predict_proba(X)
-        return np.where(probabilities >= 0.5, 1, 0)
+        return (probabilities >= 0.5).astype(int)
 
 
 class SpaceBoostingClassifier:
@@ -253,7 +256,6 @@ class SpaceBoostingClassifier:
         alpha=0.0,
         min_samples_split=2,
         min_samples_leaf=1,
-        n_splits=255,
         random_state=None,
     ):
         self.n_estimators = n_estimators
@@ -261,7 +263,6 @@ class SpaceBoostingClassifier:
         self.max_depth = max_depth
         self.min_samples_split = min_samples_split
         self.min_samples_leaf = min_samples_leaf
-        self.n_splits = n_splits
         self.trees = []
         self.alpha = alpha
         self.init_prediction = None
@@ -273,6 +274,7 @@ class SpaceBoostingClassifier:
 
         # Initialize raw scores (logit of mean target)
         mean_y = np.mean(y)
+        mean_y = np.clip(mean_y, 1e-6, 1 - 1e-6)  # Avoid division by zero
         self.init_prediction = np.log(mean_y / (1 - mean_y))
         current_predictions = np.full(
             len(y), self.init_prediction, dtype=np.float32
@@ -284,7 +286,6 @@ class SpaceBoostingClassifier:
                 max_depth=self.max_depth,
                 min_samples_split=self.min_samples_split,
                 min_samples_leaf=self.min_samples_leaf,
-                n_splits=self.n_splits,
                 alpha=self.alpha,
                 random_state=(
                     self.random_state + i if self.random_state is not None else None
@@ -297,10 +298,14 @@ class SpaceBoostingClassifier:
             current_predictions += self.learning_rate * tree.predict_proba(X, raw=True)
 
     def predict_proba(self, X, raw=False):
+        X = np.asarray(X, dtype=np.float32)
         logits = np.full(len(X), self.init_prediction, dtype=np.float32)
         for tree in self.trees:
             logits += self.learning_rate * tree.predict_proba(X, raw=True)
-        return logits if raw else 1 / (1 + np.exp(-logits))
+        if raw:
+            return logits
+        else:
+            return 1 / (1 + np.exp(-logits))
 
     def predict(self, X):
         probabilities = self.predict_proba(X)
