@@ -28,20 +28,22 @@ class SpaceTreeRegressor:
     def _project_data(self, X):
         return X @ self.direction
 
-    def _find_best_split(self, X, y):
-        n_samples = len(y)
+    def _find_best_split(self, start, end):
+        n_samples = end - start
 
         if n_samples < 2 * self.min_samples_leaf:
             return None, None, None
 
-        projections = self._project_data(X)
-        sort_idx = np.argsort(projections)
-        sorted_projections = projections[sort_idx]
-        sorted_y = y[sort_idx]
+        # Sliced arrays for the current node
+        sorted_projections = self.sorted_projections[start:end]
 
-        # Compute cumulative sums
-        cumsum_y = np.cumsum(sorted_y)
-        cumsum_y2 = np.cumsum(sorted_y ** 2)
+        # Compute cumulative sums for the current node
+        cumsum_y = self.cumsum_y[start:end] - (
+            self.cumsum_y[start - 1] if start > 0 else 0
+        )
+        cumsum_y2 = self.cumsum_y2[start:end] - (
+            self.cumsum_y2[start - 1] if start > 0 else 0
+        )
 
         total_sum = cumsum_y[-1]
         total_sq_sum = cumsum_y2[-1]
@@ -51,7 +53,6 @@ class SpaceTreeRegressor:
             self.min_samples_leaf, n_samples - self.min_samples_leaf
         )
 
-        # **Add this check**
         if len(possible_split_positions) == 0:
             return None, None, None
 
@@ -79,46 +80,44 @@ class SpaceTreeRegressor:
         # Total MSE
         total_mse = (left_counts * left_mse + right_counts * right_mse) / n_samples
 
-        # **Check if total_mse is empty**
         if len(total_mse) == 0:
             return None, None, None
 
         # Find the best split
         best_idx = np.argmin(total_mse)
         best_mse = total_mse[best_idx]
+
+        split_idx = possible_split_positions[best_idx]
         threshold = (
-            sorted_projections[possible_split_positions[best_idx] - 1]
-            + sorted_projections[possible_split_positions[best_idx]]
+            sorted_projections[split_idx - 1] + sorted_projections[split_idx]
         ) / 2.0
 
-        split_mask = projections <= threshold
+        # Return the absolute position of the split index
+        return threshold, start + split_idx, best_mse
 
-        return threshold, split_mask, best_mse
+    def _build_tree(self, depth=0, start=0, end=None):
+        if end is None:
+            end = len(self.sorted_y)
 
-
-    def _build_tree(self, X, y, depth=0):
-        n_samples = len(y)
-        node = {"n_samples": n_samples, "value": np.mean(y)}
+        n_samples = end - start
+        node = {"n_samples": n_samples, "value": np.mean(self.sorted_y[start:end])}
 
         if depth == self.max_depth or n_samples < 2 * self.min_samples_leaf:
             node["is_leaf"] = True
             return node
 
-        threshold, split_mask, score = self._find_best_split(X, y)
+        threshold, split_idx, score = self._find_best_split(start, end)
 
-        if threshold is None or np.all(split_mask) or not np.any(split_mask):
+        if threshold is None:
             node["is_leaf"] = True
             return node
-
-        X_left, y_left = X[split_mask], y[split_mask]
-        X_right, y_right = X[~split_mask], y[~split_mask]
 
         node.update(
             {
                 "is_leaf": False,
                 "threshold": threshold,
-                "left": self._build_tree(X_left, y_left, depth + 1),
-                "right": self._build_tree(X_right, y_right, depth + 1),
+                "left": self._build_tree(depth + 1, start, split_idx),
+                "right": self._build_tree(depth + 1, split_idx, end),
             }
         )
 
@@ -134,7 +133,18 @@ class SpaceTreeRegressor:
         y = np.asarray(y, dtype=np.float32)
 
         self.direction = self._find_direction(X, y)
-        self.tree = self._build_tree(X, y)
+        projections = self._project_data(X)
+        sort_idx = np.argsort(projections)
+
+        # Cache sorted projections and targets
+        self.sorted_projections = projections[sort_idx]
+        self.sorted_y = y[sort_idx]
+
+        # Precompute cumulative sums
+        self.cumsum_y = np.cumsum(self.sorted_y)
+        self.cumsum_y2 = np.cumsum(self.sorted_y ** 2)
+
+        self.tree = self._build_tree(depth=0, start=0, end=len(y))
         return self
 
     def predict(self, X):
@@ -142,7 +152,6 @@ class SpaceTreeRegressor:
         projections = self._project_data(X)
         predictions = np.zeros(len(X), dtype=np.float32)
         indices = np.arange(len(X))
-        node_indices = np.full(len(X), fill_value=-1, dtype=int)
         stack = [(self.tree, indices)]
 
         while stack:
