@@ -179,7 +179,7 @@ class SpaceBoostingRegressor:
         max_depth=10,
         alpha=0.0,
         min_samples_split=2,
-        min_samples_leaf=5,
+        min_samples_leaf=1,
         random_state=None,
     ):
         self.n_estimators = n_estimators
