@@ -67,7 +67,7 @@ def plot_trees_animation(X, y, model, resolution=200, filename="animation.mp4"):
     anim = FuncAnimation(fig, update, frames=len(model.trees), interval=100)
     
     # Save animation as MP4
-    anim.save(filename, writer='ffmpeg', fps=60)
+    anim.save(filename, writer='ffmpeg', fps=30)
     plt.close(fig)
 
 # Example usage after training the model
